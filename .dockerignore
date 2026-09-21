@@ -1,0 +1,9 @@
+.git
+.gitignore
+.claude
+CLAUDE.md
+docs
+/ingestlab
+/dist
+*.flv
+*.ts
