@@ -108,7 +108,15 @@ func (s *Sink) Connect() error {
 	if !s.fc.OutputFormat().Flags().Has(astiav.IOFormatFlagNofile) {
 		opts := astiav.NewDictionary()
 		defer opts.Free()
+		// Caps a write to a file; the network protocols do not read it.
 		if err := opts.Set("blocksize", "8192", 0); err != nil {
+			return err
+		}
+		// Nagle is on by default in FFmpeg's TCP, which holds a partial segment back until
+		// the previous one is acknowledged — a round trip of delay added to a publisher
+		// whose whole purpose is measuring delay. Unknown to the non-TCP protocols, which
+		// ignore it.
+		if err := opts.Set("tcp_nodelay", "1", 0); err != nil {
 			return err
 		}
 		io, err := astiav.OpenIOContext(s.url, astiav.NewIOContextFlags(astiav.IOContextFlagWrite), nil, opts)
