@@ -7,9 +7,9 @@ Written in Go against FFmpeg 8.x.
 
 ## Status
 
-Early, and usable. The impairment vocabulary, the metadata injection and the event log
-work and are tested. An optional in-process transcode and a burnt-in timecode band for
-measuring glass-to-glass latency are planned, not built.
+Early, and usable. The impairment vocabulary, the metadata injection, the event log and the
+burnt-in timecode band all work and are tested. Hardware encoding and source shaping beyond
+the band are planned, not built.
 
 ## Build
 
@@ -110,6 +110,31 @@ data stream, packagers will not see it, and ingestlab says so on startup. With t
 track on, `--interval` must be at least `--scte-duration`: `auto_return` closes each break
 where it says it will, so a shorter interval would announce the next break inside the one
 still running.
+
+### Timecode band
+
+`--epoch` burns the wall clock into the top of the picture as 32 black-and-white blocks, one
+per bit, `day(5) hour(5) minute(6) second(6) millisecond(10)` UTC with black for 1. A player
+reads it off the rendered frame, so the difference between it and the clock is end-to-end
+latency measured through every stage the viewer's video goes through — ingest, server,
+packaging, network, jitter buffer, decoder, compositor.
+
+| Option | Meaning |
+|---|---|
+| `--epoch` | draw the band, which costs a decode and a re-encode |
+| `--epoch-gop` | keyframe interval of the re-encoded video (default `1s`) |
+| `--epoch-bitrate` | constant bitrate of the re-encoded video (default 4000000) |
+
+It is off by default and everything else is a true passthrough: with `--epoch` unset no
+decoder, encoder or filter graph is allocated at all, and the source's own bitstream — its
+SPS/PPS, profile, GOP structure — reaches the server untouched. That matters for any test
+that exists to ingest one exact bitstream, so reach for the band only when latency is the
+thing being measured.
+
+The clock is read after pacing, at the last instant before the frame is encoded, and every
+impairment acts on the picture afterwards. A hold therefore shows up *in* the measurement
+rather than hiding inside it. The block size is `floor(width/32)`, so a width that is a
+multiple of 32 lines up exactly; anything else leaves a margin and ingestlab says so.
 
 ### Telemetry
 

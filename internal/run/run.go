@@ -11,11 +11,13 @@ import (
 
 	"github.com/asticode/go-astiav"
 
+	"github.com/CeeblueTV/ingestlab/internal/epoch"
 	"github.com/CeeblueTV/ingestlab/internal/events"
 	"github.com/CeeblueTV/ingestlab/internal/impair"
 	"github.com/CeeblueTV/ingestlab/internal/inject"
 	"github.com/CeeblueTV/ingestlab/internal/media"
 	"github.com/CeeblueTV/ingestlab/internal/pace"
+	"github.com/CeeblueTV/ingestlab/internal/transcode"
 	"github.com/CeeblueTV/ingestlab/internal/units"
 )
 
@@ -52,6 +54,11 @@ type Options struct {
 	CrashAfter      units.Duration
 
 	Meta inject.Config
+
+	// Epoch burns the wall clock into the picture, which costs a decode and a re-encode.
+	Epoch        bool
+	EpochGOP     units.Duration
+	EpochBitrate int64
 
 	EventsPath  string
 	SummaryPath string
@@ -96,7 +103,15 @@ func Run(ctx context.Context, o Options) (err error) {
 		}
 	}()
 
-	tracks, err := mapTracks(src, sink, o, log)
+	shaper, err := newShaper(src, sink, o, log)
+	if err != nil {
+		return err
+	}
+	if shaper != nil {
+		defer shaper.Close()
+	}
+
+	tracks, err := mapTracks(src, sink, o, log, shaper)
 	if err != nil {
 		return err
 	}
@@ -114,7 +129,7 @@ func Run(ctx context.Context, o Options) (err error) {
 	}
 
 	writer := &impair.Writer{Write: sink.Write, Log: log, Events: ev}
-	chain, err := buildChain(o, injector, writer, rng, log, ev)
+	chain, err := buildChain(o, shaper, injector, writer, rng, log, ev)
 	if err != nil {
 		return err
 	}
@@ -146,10 +161,15 @@ func Run(ctx context.Context, o Options) (err error) {
 	return err
 }
 
-func buildChain(o Options, injector *inject.Injector, writer *impair.Writer,
-	rng *rand.Rand, log *slog.Logger, ev *events.Log) (*impair.Chain, error) {
+func buildChain(o Options, shaper *transcode.Video, injector *inject.Injector,
+	writer *impair.Writer, rng *rand.Rand, log *slog.Logger, ev *events.Log) (*impair.Chain, error) {
 
 	var stages []impair.Stage
+	// First, so the clock is read after pacing and every impairment below acts on a
+	// picture that already states when it was sent.
+	if shaper != nil {
+		stages = append(stages, shaper)
+	}
 	if injector != nil {
 		stages = append(stages, injector)
 	}
@@ -239,7 +259,49 @@ func newHold(o Options, rng *rand.Rand, log *slog.Logger, ev *events.Log) (*impa
 	return h, nil
 }
 
-func mapTracks(src *media.Source, sink *media.Sink, o Options, log *slog.Logger) (map[int]*impair.Track, error) {
+// newShaper builds the transcode stage when --epoch asks for it, over the video stream
+// that mapTracks would keep. Nothing is allocated when it is off, which is the point of
+// the option existing at all.
+func newShaper(src *media.Source, sink *media.Sink, o Options, log *slog.Logger) (*transcode.Video, error) {
+	if !o.Epoch {
+		return nil, nil
+	}
+
+	var in *astiav.Stream
+	for _, s := range src.Streams() {
+		if impair.KindOf(s.CodecParameters().MediaType()) == impair.Video {
+			in = s
+			break
+		}
+	}
+	if in == nil {
+		return nil, errors.New("--epoch needs a video stream to draw the band on")
+	}
+
+	cfg := transcode.Config{
+		Bitrate:      o.EpochBitrate,
+		GlobalHeader: sink.NeedsGlobalHeader(),
+	}
+	if o.EpochGOP.Present {
+		cfg.GOP = o.EpochGOP.Value
+	}
+
+	v, err := transcode.NewVideo(in, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("--epoch: %w", err)
+	}
+	log.Info("burning the epoch band", "stream", in.Index(),
+		"size", fmt.Sprintf("%dx%d", in.CodecParameters().Width(), in.CodecParameters().Height()),
+		"block", epoch.BlockSize(in.CodecParameters().Width()))
+	if in.CodecParameters().Width()%epoch.Blocks != 0 {
+		log.Warn("the width is not a multiple of 32, so the band leaves a margin and a "+
+			"scaled delivery will not line up with it", "width", in.CodecParameters().Width())
+	}
+	return v, nil
+}
+
+func mapTracks(src *media.Source, sink *media.Sink, o Options, log *slog.Logger,
+	shaper *transcode.Video) (map[int]*impair.Track, error) {
 	tracks := map[int]*impair.Track{}
 	var haveAudio, haveVideo bool
 
@@ -260,13 +322,31 @@ func mapTracks(src *media.Source, sink *media.Sink, o Options, log *slog.Logger)
 			continue
 		}
 
-		out, err := sink.AddStream(in)
+		var (
+			out      *astiav.Stream
+			err      error
+			shaped   = shaper != nil && shaper.StreamIndex() == in.Index()
+			timebase = in.TimeBase()
+			codec    = in.CodecParameters().CodecID().Name()
+		)
+		if shaped {
+			// The output describes the encoder, not the source: it is a different bitstream.
+			out, err = sink.AddEncodedStream(shaper.Encoder())
+			timebase, codec = shaper.Encoder().TimeBase(), "h264 (re-encoded for the band)"
+		} else {
+			out, err = sink.AddStream(in)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("mapping stream %d: %w", in.Index(), err)
 		}
-		tracks[in.Index()] = &impair.Track{Kind: kind, In: in, Out: out, TimeBase: in.TimeBase()}
+
+		t := &impair.Track{Kind: kind, In: in, Out: out, TimeBase: timebase}
+		tracks[in.Index()] = t
+		if shaped {
+			shaper.Bind(t)
+		}
 		log.Info("mapped stream", "in", in.Index(), "out", out.Index(), "type", string(kind),
-			"codec", in.CodecParameters().CodecID().Name())
+			"codec", codec)
 	}
 	return tracks, nil
 }

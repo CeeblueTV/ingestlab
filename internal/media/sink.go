@@ -51,6 +51,27 @@ func FormatForURL(url string) string {
 
 func (s *Sink) FormatName() string { return s.fc.OutputFormat().Name() }
 
+// NeedsGlobalHeader reports whether the container carries extradata out of band, which
+// an encoder has to be told before it opens.
+func (s *Sink) NeedsGlobalHeader() bool {
+	return s.fc.OutputFormat().Flags().Has(astiav.IOFormatFlagGlobalheader)
+}
+
+// AddEncodedStream creates an output stream described by an encoder rather than by a
+// source stream, for a track we re-encode on the way through.
+func (s *Sink) AddEncodedStream(cc *astiav.CodecContext) (*astiav.Stream, error) {
+	out := s.fc.NewStream(nil)
+	if out == nil {
+		return nil, errors.New("output stream is nil")
+	}
+	if err := cc.ToCodecParameters(out.CodecParameters()); err != nil {
+		return nil, fmt.Errorf("copying encoder parameters: %w", err)
+	}
+	out.CodecParameters().SetCodecTag(0)
+	out.SetTimeBase(cc.TimeBase())
+	return out, nil
+}
+
 // AddStream copies a source stream's parameters into a new output stream.
 func (s *Sink) AddStream(src *astiav.Stream) (*astiav.Stream, error) {
 	out := s.fc.NewStream(nil)
