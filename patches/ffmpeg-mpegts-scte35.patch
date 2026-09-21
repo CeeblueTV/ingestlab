@@ -1,0 +1,132 @@
+avformat/mpegtsenc: carry SCTE-35 as a section stream
+
+Rebased onto FFmpeg 8.0; applies cleanly to release/8.1, release/9.0 and master.
+Upstream took the demuxer half (mpegts.c recognises stream_type 0x86 behind a CUEI
+registration descriptor) but the muxer still has nothing, so an SCTE-35 stream leaves
+as private data and no packager sees it. Proposed upstream in Nov 2021, Jul 2023 and
+Jun 2025, unmerged each time.
+
+Three changes:
+
+  1. get_dvb_stream_type(): AV_CODEC_ID_SCTE_35 -> stream_type 0x86.
+  2. mpegts_write_pmt(): emit the CUEI registration descriptor at program level when the
+     service carries a cue stream, as ANSI/SCTE 35 requires. Without it even FFmpeg's own
+     demuxer ignores the 0x86 stream. The stream-membership test is factored into
+     service_has_stream() so the new pre-pass and the existing loop agree.
+  3. mpegts_write_packet_internal(): write the splice_info_section as PSI rather than PES.
+
+Known limitation: -max_delay shifts the media's PES timestamps but cannot shift a
+splice_time without rewriting the section, so cues drift against media if it is set.
+It defaults to 0 and ingestlab never sets it.
+
+diff --git a/libavformat/mpegtsenc.c b/libavformat/mpegtsenc.c
+index 6935b71cfe..420b3440ec 100644
+--- a/libavformat/mpegtsenc.c
++++ b/libavformat/mpegtsenc.c
+@@ -443,6 +443,9 @@ static int get_dvb_stream_type(AVFormatContext *s, AVStream *st)
+             stream_type = STREAM_TYPE_PRIVATE_DATA;
+         }
+         break;
++    case AV_CODEC_ID_SCTE_35:
++        stream_type = STREAM_TYPE_SCTE_DATA_SCTE_35;
++        break;
+     default:
+         av_log_once(s, AV_LOG_WARNING, AV_LOG_DEBUG, &ts_st->data_st_warning,
+                     "Stream %d, codec %s, is muxed as a private data stream "
+@@ -508,6 +511,22 @@ static int get_m2ts_stream_type(AVFormatContext *s, AVStream *st)
+     return stream_type;
+ }
+ 
++static int service_has_stream(AVFormatContext *s, MpegTSService *service, int idx)
++{
++    AVProgram *program;
++    int k;
++
++    if (!s->nb_programs)
++        return 1;
++
++    program = service->program;
++    for (k = 0; k < program->nb_stream_indexes; k++)
++        if (program->stream_index[k] == idx)
++            return 1;
++
++    return 0;
++}
++
+ static int mpegts_write_pmt(AVFormatContext *s, MpegTSService *service)
+ {
+     MpegTSWrite *ts = s->priv_data;
+@@ -530,6 +549,17 @@ static int mpegts_write_pmt(AVFormatContext *s, MpegTSService *service)
+         *q++ = 0xfc;        // private_data_byte
+     }
+ 
++    /* ANSI/SCTE 35 section 8.1: a cue stream is identified by a CUEI registration
++     * descriptor at program level. Without it a receiver has no reason to read the
++     * 0x86 stream as splice information, and our own demuxer will not. */
++    for (i = 0; i < s->nb_streams; i++) {
++        if (s->streams[i]->codecpar->codec_id == AV_CODEC_ID_SCTE_35 &&
++            service_has_stream(s, service, i)) {
++            put_registration_descriptor(&q, MKTAG('C', 'U', 'E', 'I'));
++            break;
++        }
++    }
++
+     val = 0xf000 | (q - program_info_length_ptr - 2);
+     program_info_length_ptr[0] = val >> 8;
+     program_info_length_ptr[1] = val;
+@@ -542,19 +572,8 @@ static int mpegts_write_pmt(AVFormatContext *s, MpegTSService *service)
+         const char *language = lang && strlen(lang->value) >= 3 ? lang->value : default_language;
+         enum AVCodecID codec_id = st->codecpar->codec_id;
+ 
+-        if (s->nb_programs) {
+-            int k, found = 0;
+-            AVProgram *program = service->program;
+-
+-            for (k = 0; k < program->nb_stream_indexes; k++)
+-                if (program->stream_index[k] == i) {
+-                    found = 1;
+-                    break;
+-                }
+-
+-            if (!found)
+-                continue;
+-        }
++        if (!service_has_stream(s, service, i))
++            continue;
+ 
+         if (q - data > SECTION_LENGTH - 32) {
+             err = 1;
+@@ -1886,6 +1905,33 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
+         ts->first_dts_checked = 1;
+     }
+ 
++    /* A splice_info_section is PSI, not PES: it goes into TS packets on its own PID with a
++     * pointer_field, and its timing lives in the section's splice_time rather than in a PES
++     * header. The packet is passed through as it arrived; only the section CRC is recomputed.
++     * Note this ignores -max_delay, which shifts the PES timestamps of the media but cannot
++     * shift a splice_time without rewriting the section. */
++    if (st->codecpar->codec_id == AV_CODEC_ID_SCTE_35) {
++        MpegTSSection section = {
++            .pid           = ts_st->pid,
++            .cc            = ts_st->cc,
++            .discontinuity = ts_st->discontinuity,
++            .write_packet  = section_write_packet,
++            .opaque        = s,
++        };
++        uint8_t section_buf[SECTION_LENGTH];
++
++        if (size < 4 || size > sizeof(section_buf)) {
++            av_log(s, AV_LOG_ERROR, "SCTE-35 section of %d bytes is out of range\n", size);
++            return AVERROR_INVALIDDATA;
++        }
++        memcpy(section_buf, buf, size);
++        mpegts_write_section(&section, section_buf, size);
++
++        ts_st->cc            = section.cc;
++        ts_st->discontinuity = section.discontinuity;
++        return 0;
++    }
++
+     if (ts->copyts < 1) {
+         if (pts != AV_NOPTS_VALUE)
+             pts += delay;
