@@ -37,12 +37,18 @@ func sample(t *testing.T) string {
 	return path
 }
 
-// publish runs one scenario to a temporary FLV and returns its path.
+// publish runs one scenario to a temporary FLV, unpaced, and returns its path.
 func publish(t *testing.T, o Options) string {
 	t.Helper()
-	dest := filepath.Join(t.TempDir(), "out.flv")
-	o.Source, o.Dest = sample(t), dest
-	o.VOD, o.Loop = true, 0
+	o.VOD = true
+	return publishTo(t, o, "out.flv")
+}
+
+// publishTo runs one scenario to a temporary file whose extension picks the container.
+func publishTo(t *testing.T, o Options, name string) string {
+	t.Helper()
+	dest := filepath.Join(t.TempDir(), name)
+	o.Source, o.Dest, o.Loop = sample(t), dest, 0
 	o.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	if o.Meta.Types == nil {
 		o.Meta.Interval = time.Second
@@ -199,6 +205,53 @@ func TestStopMediaLeavesMetadataRunning(t *testing.T) {
 	}
 	if lastData < 30*time.Second {
 		t.Fatalf("the injected track stopped at %v, it should outlive the media", lastData)
+	}
+}
+
+// The only test that runs in real time, and the only one on MPEG-TS: the others publish
+// FLV as fast as the sink accepts, so nothing else covers the pacer or the container that
+// carries every injected track. One paced run pays for all three.
+func TestPacedTSCarriesHoldAndID3(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this one publishes in real time")
+	}
+
+	start := time.Now()
+	path := publishTo(t, Options{
+		Meta:         inject.Config{Types: []inject.Type{inject.ID3}, Interval: time.Second},
+		HoldTracks:   []string{"video"},
+		HoldAt:       []time.Duration{4 * time.Second},
+		HoldDuration: after(3 * time.Second),
+		CrashAfter:   after(10 * time.Second),
+	}, "out.ts")
+	elapsed := time.Since(start)
+
+	// Paced means the wall clock follows the media clock. Unpaced, this takes well under
+	// a second.
+	if elapsed < 7*time.Second {
+		t.Fatalf("10s of media published in %v, the pacer did not run", elapsed)
+	}
+
+	var audioAt, ahead time.Duration
+	var id3 int
+	for _, p := range readBack(t, path) {
+		switch p.kind {
+		case impair.Audio:
+			audioAt = max(audioAt, p.dts)
+		case impair.Video:
+			ahead = max(ahead, audioAt-p.dts)
+		default:
+			id3++
+		}
+	}
+
+	// How far audio had run by the time each video packet was written. The muxer
+	// interleaves within 100 ms, so seconds of it can only be the hold.
+	if ahead < 2*time.Second {
+		t.Fatalf("audio ran at most %v ahead of video, the 3s hold did not reach the wire", ahead)
+	}
+	if id3 < 5 {
+		t.Fatalf("%d ID3 packets arrived, want one a second", id3)
 	}
 }
 
