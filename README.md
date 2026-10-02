@@ -157,4 +157,5 @@ SIGINT and SIGTERM write the trailer and unpublish cleanly, within a few seconds
 
 ## Licence
 
-Source is MIT. A distributed Docker image links x264/x265 and is therefore GPL-3.0.
+[GNU Affero General Public License v3.0](LICENSE) or later. A distributed Docker image also
+links x264/x265, which are GPL-3.0 and compatible with it.

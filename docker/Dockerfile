@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # FFmpeg 8.x is newer than any distro package and the SCTE-35 muxer patch is not upstream,
-# so the image builds its own. x264/x265 force --enable-gpl, which is why the published
-# image is GPL-3.0 while the source stays MIT. Never --enable-nonfree: it would make the
-# image non-redistributable.
+# so the image builds its own. x264/x265 force --enable-gpl; GPL-3.0 combines with the
+# AGPL-3.0 source. Never --enable-nonfree: it would make the image non-redistributable.
 #
 # OpenSSL is the TLS behind rtmps:// (and https://): without a TLS library libavformat has
 # no tls protocol and every such URL fails with "Protocol not found". OpenSSL 3 is
