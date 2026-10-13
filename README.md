@@ -1,39 +1,126 @@
-# ingestlab
-
-A stream impairment and conformance lab: publish media to a live endpoint, inject timed
-metadata and SCTE-35, and break the stream on purpose to see what downstream does about it.
+<p align="center">
+ <a href="#quick-start">Quick start</a> •
+ <a href="#building-locally">Building locally</a> •
+ <a href="#usage">Usage</a> •
+ <a href="#telemetry">Telemetry</a> •
+ <a href="#shutdown">Shutdown</a> •
+ <a href="#license">License</a>
+</p>
+<h1 align="center">
+  ingestlab
+</h1>
+<h4 align="center">A stream impairment and conformance lab: publish media to a live endpoint, inject timed metadata and SCTE-35, and break the stream on purpose to see what downstream does about it.</h4>
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-yellow.svg" alt="License: AGPL v3"></a>
+</p>
 
 Written in Go against FFmpeg 8.x.
 
-## Status
+## Quick start
 
-Early, and usable. The impairment vocabulary, the metadata injection, the event log and the
-burnt-in timecode band all work and are tested. Hardware encoding and source shaping beyond
-the band are planned, not built.
-
-## Build
-
-Needs FFmpeg 8.x development libraries.
+The Docker image is the shortest way in: it builds its own FFmpeg with everything ingestlab
+can use, so Docker is the only thing to install.
 
 ```sh
-PKG_CONFIG_PATH=/usr/local/lib/pkgconfig go build ./cmd/ingestlab
+git clone https://github.com/CeeblueTV/ingestlab.git
+cd ingestlab
+docker build -t ingestlab -f docker/Dockerfile .
 ```
 
-SCTE-35 over MPEG-TS additionally needs a patched FFmpeg — see
-[patches/](patches/ffmpeg-mpegts-scte35.patch). Everything else runs on a stock build.
+Then publish a file from a local folder, here with the [timecode band](#timecode-band) burnt in:
 
 ```sh
-cd path/to/FFmpeg && git apply path/to/ingestlab/patches/ffmpeg-mpegts-scte35.patch
-make -j"$(nproc)" && sudo make install
+docker run -it --rm -v ~/videos/:/var/videos/ ingestlab \
+    /var/videos/<your file> rtmp://<host>/live/<your stream> --epoch
 ```
 
-## Use
+> [!NOTE]
+> The first build compiles FFmpeg and takes several minutes. The image includes SRT,
+> RTMPS, libx264 and the [SCTE-35 muxer patch](#injected-metadata).
+
+> [!TIP]
+> Inside the container `localhost` is the container itself. To reach a server running on the
+> same machine, add `--network host` (Linux) or publish to `host.docker.internal` (Docker
+> Desktop).
+
+## Building locally
+
+### Prerequisites
+
+- [Go](https://go.dev/dl/) 1.25 or later
+- A C compiler and `pkg-config`, since the FFmpeg bindings use cgo
+- FFmpeg 8.x shared libraries and headers
+
+FFmpeg is optional piece by piece, depending on what you use:
+
+| For | FFmpeg needs |
+|---|---|
+| `srt://` | `--enable-libsrt` |
+| `rtmps://` | `--enable-openssl` |
+| `--epoch` | `--enable-libx264` |
+| SCTE-35 over MPEG-TS | [patches/ffmpeg-mpegts-scte35.patch](patches/ffmpeg-mpegts-scte35.patch) |
+
+### FFmpeg
+
+FFmpeg 8 is newer than most distribution packages, so build it from source. On Debian or
+Ubuntu:
+
+```sh
+sudo apt-get install build-essential nasm pkg-config libsrt-openssl-dev libssl-dev libx264-dev
+curl -fsSL https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz | tar -xJ
+cd ffmpeg-8.0
+patch -p1 < path/to/ingestlab/patches/ffmpeg-mpegts-scte35.patch   # optional
+./configure --prefix=/usr/local --enable-shared --disable-static \
+    --enable-gpl --enable-version3 --enable-libx264 --enable-libsrt --enable-openssl
+make -j"$(nproc)" && sudo make install && sudo ldconfig
+```
+
+### Build
+
+```sh
+git clone https://github.com/CeeblueTV/ingestlab.git
+cd ingestlab
+export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+go build ./cmd/ingestlab
+```
+
+Or install it straight into `$GOPATH/bin`:
+
+```sh
+PKG_CONFIG_PATH=/usr/local/lib/pkgconfig go install github.com/CeeblueTV/ingestlab/cmd/ingestlab@latest
+```
+
+> [!TIP]
+> No server is needed to try it: the destination can be a file.
+> ```sh
+> ./ingestlab video.mkv /tmp/out.flv --vod --loop 0
+> ```
+> If the binary cannot find `libavformat`, run `sudo ldconfig` or set
+> `LD_LIBRARY_PATH=/usr/local/lib`.
+
+### Tests
+
+```sh
+go test ./...
+```
+
+The read-back tests publish a real file and assert on what arrived. They skip unless
+`INGESTLAB_SAMPLE` points at a source whose first audio stream is AAC, since FLV rejects
+Opus. One of them runs in real time; `-short` skips it.
+
+## Usage
+
+```sh
+ingestlab <source> <destination> [options]
+```
 
 ```sh
 ingestlab video.mkv rtmp://host/live/key
 ingestlab video.mkv srt://host:9000 --loop 0
 ingestlab video.mkv rtmp://host/live/key --hold-tracks video --hold-at 20s,60s
 ```
+
+Options come after the source and destination.
 
 Durations accept a unit anywhere: `10s`, `1500ms`, `2m`, `1h`. A bare number is
 milliseconds.
@@ -44,15 +131,16 @@ the same seed and the same source reproduces.
 
 ### Source and output
 
-| Option | Meaning |
-|---|---|
-| `--format` | output container; guessed from the destination scheme when unset |
-| `--map-all` | map every input stream, not just the first audio and video |
-| `--map-timed-data` | also map input subtitle and data streams |
-| `--vod` | send as fast as the output accepts, without real-time pacing |
-| `--loop` | extra passes over the input, `-1` for endless |
-| `--output-ts-offset` | delay every output timestamp |
-| `--seed` | seed for every random draw; `0` picks one and logs it |
+| Option | Default | Meaning |
+|---|---|---|
+| `--format` | from the destination | output container |
+| `--map-all` | off | map every input stream, not just the first audio and video |
+| `--map-timed-data` | off | also map input subtitle and data streams |
+| `--vod` | off | send as fast as the output accepts, without real-time pacing |
+| `--loop` | `-1` | extra passes over the input, `-1` for endless |
+| `--output-ts-offset` | `0` | delay every output timestamp |
+| `--seed` | `0` | seed for every random draw; `0` picks one and logs it |
+| `-v` | off | verbose logging, FFmpeg's own included |
 
 ### Delivery impairments
 
@@ -60,16 +148,17 @@ These change *when* a packet that already exists leaves the process. Timestamps 
 the wire and timestamps used for pacing are separate: an offset moves the first, never the
 second.
 
-| Option | Meaning |
-|---|---|
-| `--jitter`, `--jitter-min` | deliver in back-to-back bursts of up to this much buffered media |
-| `--cadence-jitter` | wobble each video output timestamp by ±this much; audio stays steady |
-| `--audio-offset`, `--video-offset` | shift one track's output timestamps to build an A/V desync |
-| `--hold-tracks` | tracks to freeze: `audio,video,subtitle,data` (`data` covers the injected tracks) |
-| `--hold-duration` | length of each hold; `0` freezes for good and drops (default `10s`) |
-| `--hold-duration-min` | when set, each hold lasts a random time up to `--hold-duration` |
-| `--hold-every` | start a hold this often (default `30s`) |
-| `--hold-at` | explicit hold times, e.g. `20s,60s`; overrides `--hold-every` |
+| Option | Default | Meaning |
+|---|---|---|
+| `--jitter` | off | deliver in back-to-back bursts of up to this much buffered media |
+| `--jitter-min` | `0` | shortest burst; each one lasts a random time between this and `--jitter` |
+| `--cadence-jitter` | off | wobble each video output timestamp by ±this much; audio stays steady |
+| `--audio-offset`, `--video-offset` | `0` | shift one track's output timestamps to build an A/V desync |
+| `--hold-tracks` | none | tracks to freeze: `audio,video,subtitle,data` (`data` covers the injected tracks) |
+| `--hold-duration` | `10s` | length of each hold; `0` freezes for good and drops |
+| `--hold-duration-min` | unset | when set, each hold lasts a random time between this and `--hold-duration` |
+| `--hold-every` | `30s` | start a hold this often |
+| `--hold-at` | unset | explicit hold times, e.g. `20s,60s`; overrides `--hold-every` |
 
 A hold never rewrites a timestamp. The held track's packets pile up, the other tracks keep
 flowing, and the burst arrives seconds behind with its original timing — which is what the
@@ -81,11 +170,13 @@ blunts these impairments: a 5 s hold measures 4.89 s behind at 100 ms and 4.49 s
 
 ### Track lifecycle faults
 
+All of these are off by default.
+
 | Option | Meaning |
 |---|---|
-| `--start-audio-after`, `--start-video-after` | withhold a track until this much media has passed (ENG-241) |
+| `--start-audio-after`, `--start-video-after` | withhold a track until this much media has passed |
 | `--stop-media-after` | stop sending audio and video; injected metadata keeps flowing |
-| `--error-media-after` | replace the video payload with garbage (ENG-664) |
+| `--error-media-after` | replace the video payload with garbage |
 | `--crash-after` | drop the connection without a trailer and exit 3 |
 
 These run on the media clock: `--output-ts-offset` is a wire offset and does not move the
@@ -93,14 +184,17 @@ instant `--stop-media-after` fires.
 
 ### Injected metadata
 
-| Option | Meaning |
-|---|---|
-| `--meta-tracks` | `metadata`, `scte35`, `id3`, `subtitles`, `none` (default `metadata`) |
-| `--interval` | how often to emit; `0` announces the track and leaves it empty (default `1s`) |
-| `--start-meta-after` | delay the first emission |
-| `--onfi` | send the timecode as `onFI` instead of `onMetaData` |
-| `--id3-description` | TXXX description for the `id3` track |
-| `--scte-id`, `--scte-duration`, `--scte-announce`, `--scte-oncuepoint` | SCTE-35 cue shape |
+| Option | Default | Meaning |
+|---|---|---|
+| `--meta-tracks` | `metadata` | tracks to inject: `metadata`, `scte35`, `id3`, `subtitles`, `none` |
+| `--interval` | `1s` | how often to emit; `0` announces the track and leaves it empty |
+| `--start-meta-after` | `0` | delay the first emission |
+| `--onfi` | off | send the timecode as `onFI` instead of `onMetaData` |
+| `--id3-description` | `ceeblue.metadata` | TXXX description for the `id3` track |
+| `--scte-id` | `0` | first SCTE-35 event id, incremented per cue |
+| `--scte-duration` | `4s` | length of each SCTE-35 break |
+| `--scte-announce` | `4s` | how far ahead of the break the cue is sent |
+| `--scte-oncuepoint` | off | send `onCuePoint` (AWS Elemental) instead of `onAdCue` over FLV |
 
 FLV carries one metadata track at a time; MPEG-TS carries all of them. `id3` needs MPEG-TS.
 `scte35` emits `onAdCue` (or `onCuePoint`) over FLV, and a `splice_insert` section over
@@ -119,11 +213,11 @@ reads it off the rendered frame, so the difference between it and the clock is e
 latency measured through every stage the viewer's video goes through — ingest, server,
 packaging, network, jitter buffer, decoder, compositor.
 
-| Option | Meaning |
-|---|---|
-| `--epoch` | draw the band, which costs a decode and a re-encode |
-| `--epoch-gop` | keyframe interval of the re-encoded video (default `1.6s`, the GOP Ceeblue advises: 48 frames at 30 fps, 75 AAC frames at 48 kHz) |
-| `--epoch-bitrate` | constant bitrate of the re-encoded video (default 4000000) |
+| Option | Default | Meaning |
+|---|---|---|
+| `--epoch` | off | draw the band, which costs a decode and a re-encode |
+| `--epoch-gop` | `1.6s` | keyframe interval of the re-encoded video |
+| `--epoch-bitrate` | `4000000` | constant bitrate of the re-encoded video, in bits per second |
 
 It is off by default and everything else is a true passthrough: with `--epoch` unset no
 decoder, encoder or filter graph is allocated at all, and the source's own bitstream — its
@@ -136,10 +230,15 @@ impairment acts on the picture afterwards. A hold therefore shows up *in* the me
 rather than hiding inside it. The block size is `floor(width/32)`, so a width that is a
 multiple of 32 lines up exactly; anything else leaves a margin and ingestlab says so.
 
-### Telemetry
+## Telemetry
 
-`--events` writes an `events.jsonl` of what the run actually did, so a reader of the stream
-can assert against ground truth instead of inferring it from symptoms:
+| Option | Default | Meaning |
+|---|---|---|
+| `--events` | unset | path of an `events.jsonl` of what the run actually did |
+| `--summary` | unset | path of a `summary.json` written when the run ends |
+
+The event log lets a reader of the stream assert against ground truth instead of inferring
+it from symptoms:
 
 ```json
 {"t_wall":"2026-09-20T20:21:13.102Z","t_media":20,"kind":"hold.start","tracks":["video"],"until":25}
@@ -147,15 +246,14 @@ can assert against ground truth instead of inferring it from symptoms:
 ```
 
 Kinds: `stream.start`, `stream.end`, `loop`, `hold.start`, `hold.burst`, `hold.drop`,
-`jitter.burst`, `fault.injected`, `scte35.cue`, `meta.sent`. `--summary` writes a
-`summary.json` of the run.
+`jitter.burst`, `fault.injected`, `scte35.cue`, `meta.sent`.
 
 ## Shutdown
 
 SIGINT and SIGTERM write the trailer and unpublish cleanly, within a few seconds.
 `--crash-after` is the explicit way to vanish mid-stream instead.
 
-## Licence
+## License
 
-[GNU Affero General Public License v3.0](LICENSE) or later. A distributed Docker image also
-links x264/x265, which are GPL-3.0 and compatible with it.
+[GNU Affero General Public License v3.0](LICENSE) or later. The Docker image also links
+x264 and x265, which are GPL-2.0-or-later and combine with it under GPL-3.0.
