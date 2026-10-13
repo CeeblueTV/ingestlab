@@ -192,7 +192,7 @@ func buildChain(o Options, shaper *transcode.Video, injector *inject.Injector,
 	if o.Jitter > 0 && !o.VOD {
 		if o.JitterMin > o.Jitter {
 			log.Warn("jitter-min is above jitter, using a fixed window", "min", o.JitterMin, "max", o.Jitter)
-			o.JitterMin = 0
+			o.JitterMin = o.Jitter
 		}
 		log.Info("bursting delivery", "window", o.Jitter, "min", o.JitterMin)
 		stages = append(stages, &impair.Jitter{
