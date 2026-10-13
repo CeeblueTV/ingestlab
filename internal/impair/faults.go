@@ -13,14 +13,14 @@ import (
 
 // garbage is the payload --error-media-after writes over a video packet: an access unit
 // delimiter followed by a truncated NAL. The exact bytes matter — decoders differ in what
-// they salvage — so treat them as fixed (ENG-664).
+// they salvage — so treat them as fixed.
 var garbage = []byte{0x00, 0x00, 0x00, 0x01, 0x09, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04}
 
 // Faults are the track lifecycle impairments: a track that starts late, stops early, turns
 // to garbage, or a publisher that dies. All of them run on the media clock.
 //
 // Injected tracks are left alone, so metadata keeps flowing after the media stops — that
-// asymmetry is what makes --stop-media-after useful for ENG-241.
+// asymmetry is what --stop-media-after exists to test.
 type Faults struct {
 	StartAudio units.Duration
 	StartVideo units.Duration
@@ -89,8 +89,8 @@ func (f *Faults) Process(p *Packet, next Emit) error {
 func (f *Faults) Flush(Emit) error { return nil }
 
 // startAfter is the media time before which this track is withheld entirely. The first
-// packet delivered is whatever the source had there, keyframe or not, which is the part of
-// ENG-241 worth reproducing.
+// packet delivered is whatever the source had there, keyframe or not, which is the part
+// worth reproducing.
 func (f *Faults) startAfter(k Kind) (time.Duration, bool) {
 	switch k {
 	case Audio:

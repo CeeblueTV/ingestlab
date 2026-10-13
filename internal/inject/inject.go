@@ -84,7 +84,7 @@ func ParseTypes(values []string) ([]Type, error) {
 }
 
 // Injector is the pipeline stage. It is the first one, so what it emits goes through every
-// impairment: a held or burst data track is exactly what ENG-1345 is about.
+// impairment: a held or burst data track is a case worth testing in its own right.
 type Injector struct {
 	emitters []*emitter
 	Log      *slog.Logger
