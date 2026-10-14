@@ -4,6 +4,7 @@
  <a href="#usage">Usage</a> •
  <a href="#telemetry">Telemetry</a> •
  <a href="#shutdown">Shutdown</a> •
+ <a href="#contribution">Contribution</a> •
  <a href="#license">License</a>
 </p>
 <h1 align="center">
@@ -18,8 +19,20 @@ Written in Go against FFmpeg 8.x.
 
 ## Quick start
 
-The Docker image is the shortest way in: it builds its own FFmpeg with everything ingestlab
-can use, so Docker is the only thing to install.
+The Docker image is the shortest way in: it carries its own FFmpeg with everything ingestlab
+can use, including SRT, RTMPS, libx264 and the [SCTE-35 muxer patch](#injected-metadata), so
+Docker is the only thing to install.
+
+Publish a file from a local folder, here with the [timecode band](#timecode-band) burnt in:
+
+```sh
+docker run -it --rm -v ~/videos/:/var/videos/ ghcr.io/ceebluetv/ingestlab \
+    /var/videos/<your file> rtmp://<host>/live/<your stream> --epoch
+```
+
+Each [release](https://github.com/CeeblueTV/ingestlab/releases) is published for
+`linux/amd64` as `ghcr.io/ceebluetv/ingestlab:<version>`, and the newest as `latest`. To build
+the image yourself instead:
 
 ```sh
 git clone https://github.com/CeeblueTV/ingestlab.git
@@ -27,16 +40,8 @@ cd ingestlab
 docker build -t ingestlab -f docker/Dockerfile .
 ```
 
-Then publish a file from a local folder, here with the [timecode band](#timecode-band) burnt in:
-
-```sh
-docker run -it --rm -v ~/videos/:/var/videos/ ingestlab \
-    /var/videos/<your file> rtmp://<host>/live/<your stream> --epoch
-```
-
 > [!NOTE]
-> The first build compiles FFmpeg and takes several minutes. The image includes SRT,
-> RTMPS, libx264 and the [SCTE-35 muxer patch](#injected-metadata).
+> The first build compiles FFmpeg and takes several minutes.
 
 > [!TIP]
 > Inside the container `localhost` is the container itself. To reach a server running on the
@@ -141,6 +146,7 @@ the same seed and the same source reproduces.
 | `--output-ts-offset` | `0` | delay every output timestamp |
 | `--seed` | `0` | seed for every random draw; `0` picks one and logs it |
 | `-v` | off | verbose logging, FFmpeg's own included |
+| `--version` | | print the version and exit; given alone |
 
 ### Delivery impairments
 
@@ -253,7 +259,15 @@ Kinds: `stream.start`, `stream.end`, `loop`, `hold.start`, `hold.burst`, `hold.d
 SIGINT and SIGTERM write the trailer and unpublish cleanly, within a few seconds.
 `--crash-after` is the explicit way to vanish mid-stream instead.
 
+## Contribution
+
+Contributions are welcome as pull requests against `main`. They are squash-merged, so the
+pull request title becomes the commit and must follow [Conventional Commits]: `fix:` and
+`feat:` cut a patch or minor release, and `feat!:` a major one.
+
 ## License
 
 [GNU Affero General Public License v3.0](LICENSE) or later. The Docker image also links
 x264 and x265, which are GPL-2.0-or-later and combine with it under GPL-3.0.
+
+[Conventional Commits]: https://www.conventionalcommits.org
