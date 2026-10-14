@@ -34,6 +34,12 @@ func main() {
 }
 
 func realMain() error {
+	// Checked before the positionals, which are otherwise required.
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println("ingestlab", buildVersion())
+		return nil
+	}
+
 	fs := flag.NewFlagSet("ingestlab", flag.ContinueOnError)
 	fs.Usage = func() { usage(); fs.PrintDefaults() }
 
@@ -173,6 +179,7 @@ func positional(argv []string) (source, dest string, rest []string, err error) {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: ingestlab <source> <destination> [options]
+       ingestlab --version
 
   ingestlab video.mkv rtmp://host/live/key
   ingestlab video.mkv srt://host:9000 --loop 0
