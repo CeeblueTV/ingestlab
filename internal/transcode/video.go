@@ -14,10 +14,13 @@ import (
 	"github.com/CeeblueTV/ingestlab/internal/impair"
 )
 
-// Defaults match the tool being replaced, so the same case measured against both is
-// measuring the tools and not two different encoders.
+// The GOP is the one Ceeblue advises ingesting: 1.6s is 48 frames at 30 fps and 75 AAC
+// frames at 48 kHz, so video and audio boundaries line up. The tool being replaced
+// defaults to 1s, so a comparison against it passes it the GOP explicitly; the bitrate
+// matches it, so the same case measured against both measures the tools and not two
+// different encoders.
 const (
-	DefaultGOP     = time.Second
+	DefaultGOP     = 1600 * time.Millisecond
 	DefaultBitrate = 4_000_000
 )
 

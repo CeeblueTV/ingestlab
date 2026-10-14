@@ -359,6 +359,9 @@ func pump(ctx context.Context, src *media.Source, chain *impair.Chain, writer *i
 
 	var pacer pace.Pacer
 	var lastLog time.Duration
+	// The worst lateness since the last progress line: the line's own `behind` is one
+	// instant every 5s, and a packet held up between two lines would never show.
+	var behindMax time.Duration
 	loops := o.Loop
 
 	for {
@@ -392,16 +395,24 @@ func pump(ctx context.Context, src *media.Source, chain *impair.Chain, writer *i
 			continue
 		}
 
+		// An unmapped stream's packet is dropped at media 0, which is not lateness.
+		_, mapped := tracks[pkt.StreamIndex()]
 		media, err := forward(ctx, pkt, chain, writer.Base, tracks, &pacer, o.VOD)
 		pkt.Unref()
 		if err != nil {
 			return err
 		}
 
+		behind := pacer.Behind(media)
+		if mapped {
+			behindMax = max(behindMax, behind)
+		}
 		if media > lastLog+5*time.Second {
 			lastLog = media
 			log.Info("progress", "media", media.Round(time.Millisecond),
-				"packets", writer.Packets, "behind", pacer.Behind(media).Round(time.Millisecond))
+				"packets", writer.Packets, "behind", behind.Round(time.Millisecond),
+				"behind_max", behindMax.Round(time.Millisecond))
+			behindMax = 0
 		}
 	}
 

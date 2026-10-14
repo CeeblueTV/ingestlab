@@ -122,7 +122,7 @@ packaging, network, jitter buffer, decoder, compositor.
 | Option | Meaning |
 |---|---|
 | `--epoch` | draw the band, which costs a decode and a re-encode |
-| `--epoch-gop` | keyframe interval of the re-encoded video (default `1s`) |
+| `--epoch-gop` | keyframe interval of the re-encoded video (default `1.6s`, the GOP Ceeblue advises: 48 frames at 30 fps, 75 AAC frames at 48 kHz) |
 | `--epoch-bitrate` | constant bitrate of the re-encoded video (default 4000000) |
 
 It is off by default and everything else is a true passthrough: with `--epoch` unset no

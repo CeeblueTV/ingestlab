@@ -97,7 +97,7 @@ func realMain() error {
 
 	// Epoch band. It re-encodes the video, so it is off unless asked for.
 	fs.BoolVar(&o.Epoch, "epoch", false, "burn the wall clock into the picture for end-to-end latency, which costs a re-encode")
-	fs.Var(&o.EpochGOP, "epoch-gop", "keyframe interval of the re-encoded video (default 1s)")
+	fs.Var(&o.EpochGOP, "epoch-gop", "keyframe interval of the re-encoded video (default 1.6s)")
 	fs.Int64Var(&o.EpochBitrate, "epoch-bitrate", 0, "constant bitrate of the re-encoded video in bits per second (default 4000000)")
 
 	// Telemetry.
