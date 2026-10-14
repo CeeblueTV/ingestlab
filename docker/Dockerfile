@@ -47,7 +47,13 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -trimpath -ldflags="-s -w" -o /out/ingestlab ./cmd/ingestlab
+# .git is not in the context, so the version has to come in from outside.
+ARG VERSION
+RUN go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/ingestlab ./cmd/ingestlab
+
+# CI's gate: `docker build --target test`. Tests run against the same patched FFmpeg.
+FROM build AS test
+RUN go vet ./... && go test -short ./...
 
 FROM debian:trixie-slim
 # ca-certificates: OpenSSL verifies the server's certificate, and needs the roots to do it.
