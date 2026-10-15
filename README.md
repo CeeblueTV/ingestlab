@@ -261,13 +261,10 @@ SIGINT and SIGTERM write the trailer and unpublish cleanly, within a few seconds
 
 ## Contribution
 
-Contributions are welcome as pull requests against `main`. They are squash-merged, so the
-pull request title becomes the commit and must follow [Conventional Commits]: `fix:` and
-`feat:` cut a patch or minor release, and `feat!:` a major one.
+All contributions are welcome. Please see [our contribution guide](CONTRIBUTING.md) for
+details.
 
 ## License
 
 [GNU Affero General Public License v3.0](LICENSE) or later. The Docker image also links
 x264 and x265, which are GPL-2.0-or-later and combine with it under GPL-3.0.
-
-[Conventional Commits]: https://www.conventionalcommits.org
