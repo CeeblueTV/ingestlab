@@ -1,0 +1,32 @@
+name: Release
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      # The bot's token, not GITHUB_TOKEN: only the bot may create v* tags, and a release
+      # made with GITHUB_TOKEN would not trigger the Docker workflow.
+      - name: Generate token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - run: npx --yes semantic-release@25
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
