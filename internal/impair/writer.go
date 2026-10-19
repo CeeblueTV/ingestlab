@@ -35,6 +35,13 @@ func (w *Writer) Process(p *Packet, next Emit) error {
 	p.Pkt.RescaleTs(t.TimeBase, tb)
 	p.Pkt.SetPos(-1)
 
+	// A B-frame stream has no dts on its first packets after each seek, and the muxer would
+	// fill one in from the previous pass. Start it at the pass start; the clamp lifts it.
+	guessed := p.Pkt.Dts() == astiav.NoPtsValue
+	if guessed {
+		p.Pkt.SetDts(0)
+	}
+
 	if shift := ticks(w.Base+p.Shift, tb); shift != 0 {
 		bump(p.Pkt, shift)
 	}
@@ -45,7 +52,11 @@ func (w *Writer) Process(p *Packet, next Emit) error {
 		if t.written && dts <= t.lastOut {
 			fix := t.lastOut + 1 - dts
 			w.Log.Debug("clamping dts to stay monotonic", "track", string(t.Kind), "dts", dts, "by", fix)
-			bump(p.Pkt, fix)
+			if guessed {
+				p.Pkt.SetDts(dts + fix) // only the dts is ours to move
+			} else {
+				bump(p.Pkt, fix)
+			}
 			dts = p.Pkt.Dts()
 		}
 		t.lastOut, t.written = dts, true

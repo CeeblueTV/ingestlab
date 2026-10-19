@@ -24,13 +24,19 @@ import (
 // $INGESTLAB_SAMPLE, or ~/samples/bbb_multi_with_time.mkv.
 func sample(t *testing.T) string {
 	t.Helper()
-	path := os.Getenv("INGESTLAB_SAMPLE")
+	return sampleAt(t, "INGESTLAB_SAMPLE", "bbb_multi_with_time.mkv")
+}
+
+// sampleAt looks in $env, then for name in ~/samples.
+func sampleAt(t *testing.T, env, name string) string {
+	t.Helper()
+	path := os.Getenv(env)
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			t.Skip("no home directory to look for a sample in")
 		}
-		path = filepath.Join(home, "samples", "bbb_multi_with_time.mkv")
+		path = filepath.Join(home, "samples", name)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("no sample at %s; set INGESTLAB_SAMPLE to run this", path)
@@ -49,7 +55,10 @@ func publish(t *testing.T, o Options) string {
 func publishTo(t *testing.T, o Options, name string) string {
 	t.Helper()
 	dest := filepath.Join(t.TempDir(), name)
-	o.Source, o.Dest, o.Loop = sample(t), dest, 0
+	if o.Source == "" {
+		o.Source = sample(t)
+	}
+	o.Dest = dest
 	o.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	if o.Meta.Types == nil {
 		o.Meta.Interval = time.Second
@@ -352,6 +361,36 @@ func firstBandWord(t *testing.T, path string) uint32 {
 		}
 	}
 	return word
+}
+
+// A B-frame source has no dts on its first packets, after every seek: looping it must
+// keep the timeline going rather than hand the muxer a dts from the pass before.
+func TestLoopKeepsBFramesMonotonic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this one reads a long sample twice")
+	}
+
+	path := publish(t, Options{
+		Source: sampleAt(t, "INGESTLAB_BFRAMES_SAMPLE", "tears_of_steel_1080p_gop15.mkv"),
+		Meta:   noMeta(),
+		Loop:   1,
+	})
+
+	var video []time.Duration
+	for _, p := range readBack(t, path) {
+		if p.kind == impair.Video {
+			video = append(video, p.dts)
+		}
+	}
+	for i := 1; i < len(video); i++ {
+		if video[i] <= video[i-1] {
+			t.Fatalf("video timestamps are not monotonic at %d: %v then %v", i, video[i-1], video[i])
+		}
+	}
+	// Two passes of a 12-minute sample.
+	if last := video[len(video)-1]; last < 24*time.Minute {
+		t.Fatalf("video ends at %v, the second pass did not arrive", last)
+	}
 }
 
 // --crash-after leaves the stream unfinished, which is the point: no clean unpublish.
