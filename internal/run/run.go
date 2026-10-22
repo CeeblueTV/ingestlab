@@ -52,6 +52,8 @@ type Options struct {
 	StopMediaAfter  units.Duration
 	ErrorMediaAfter units.Duration
 	CrashAfter      units.Duration
+	// DeferCodecConfig sends each track's sequence header with its first packet, not at connect.
+	DeferCodecConfig bool
 
 	Meta inject.Config
 
@@ -124,6 +126,12 @@ func Run(ctx context.Context, o Options) (err error) {
 		return err
 	}
 
+	if o.DeferCodecConfig {
+		if err := sink.DeferCodecConfig(); err != nil {
+			return err
+		}
+		log.Info("deferring codec config to each track's first packet")
+	}
 	if err := sink.Connect(); err != nil {
 		return err
 	}

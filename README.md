@@ -184,9 +184,16 @@ All of these are off by default.
 | `--stop-media-after` | stop sending audio and video; injected metadata keeps flowing |
 | `--error-media-after` | replace the video payload with garbage |
 | `--crash-after` | drop the connection without a trailer and exit 3 |
+| `--defer-codec-config` | FLV only: send each track's sequence header with its first packet instead of at connect |
 
 These run on the media clock: `--output-ts-offset` is a wire offset and does not move the
 instant `--stop-media-after` fires.
+
+FFmpeg sends every sequence header at connect, whatever the start delay. A live encoder
+sends only `onMetaData` until it has output, so a server sees no audio or video config at
+all until then. `--defer-codec-config` reproduces that, and with
+`--start-video-after 2500` the server gets `onMetaData`, then nothing for 2.5s, then the
+video sequence header right in front of the first video packet.
 
 ### Injected metadata
 
