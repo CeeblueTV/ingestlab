@@ -15,6 +15,9 @@ type Sink struct {
 	url         string
 	headerWrote bool
 	closed      bool
+
+	deferConfig bool
+	config      map[int][]byte // codec config waiting for its stream's first packet
 }
 
 // OpenSink allocates the muxer. format overrides the container guessed from the URL.
@@ -103,6 +106,17 @@ func (s *Sink) AddDataStream(codec astiav.CodecID, tb astiav.Rational) (*astiav.
 	return out, nil
 }
 
+// DeferCodecConfig keeps each stream's codec config (the FLV sequence header) out of the
+// container header and sends it with that stream's first packet, the way a live encoder
+// that has not produced anything yet would. Call it before Connect.
+func (s *Sink) DeferCodecConfig() error {
+	if name := s.FormatName(); name != "flv" {
+		return fmt.Errorf("deferring codec config needs FLV output, not %s", name)
+	}
+	s.deferConfig = true
+	return nil
+}
+
 // Connect opens the output and writes the container header.
 func (s *Sink) Connect() error {
 	if !s.fc.OutputFormat().Flags().Has(astiav.IOFormatFlagNofile) {
@@ -141,14 +155,76 @@ func (s *Sink) Connect() error {
 	if err := d.Set("max_interleave_delta", "100000", 0); err != nil {
 		return err
 	}
-	if err := s.fc.WriteHeader(d); err != nil {
+	write := s.fc.WriteHeader
+	if s.deferConfig {
+		write = s.writeHeaderWithoutConfig
+	}
+	if err := write(d); err != nil {
 		return fmt.Errorf("writing header: %w", err)
 	}
 	s.headerWrote = true
 	return nil
 }
 
-func (s *Sink) Write(pkt *astiav.Packet) error { return s.fc.WriteInterleavedFrame(pkt) }
+// writeHeaderWithoutConfig writes the header through a scratch buffer so the sequence
+// headers flvenc always puts in it can be dropped, then arms each stream to have flvenc
+// write its own in front of its first packet.
+func (s *Sink) writeHeaderWithoutConfig(d *astiav.Dictionary) error {
+	if s.io == nil {
+		return errors.New("deferring codec config needs an output to write to")
+	}
+	var header []byte
+	scratch, err := astiav.AllocIOContext(4096, true, nil, nil, func(b []byte) (int, error) {
+		header = append(header, b...)
+		return len(b), nil
+	})
+	if err != nil {
+		return fmt.Errorf("allocating header buffer: %w", err)
+	}
+	defer scratch.Free()
+
+	s.fc.SetPb(scratch)
+	err = s.fc.WriteHeader(d)
+	scratch.Flush()
+	s.fc.SetPb(s.io)
+	if err != nil {
+		return err
+	}
+
+	kept, err := withoutMediaTags(header)
+	if err != nil {
+		return fmt.Errorf("filtering header: %w", err)
+	}
+	s.io.Write(kept)
+	s.io.Flush()
+
+	s.config = map[int][]byte{}
+	for _, st := range s.fc.Streams() {
+		p := st.CodecParameters()
+		mt := p.MediaType()
+		config := p.ExtraData()
+		if (mt != astiav.MediaTypeAudio && mt != astiav.MediaTypeVideo) || len(config) == 0 {
+			continue
+		}
+		s.config[st.Index()] = config
+		// flvenc writes a codec header only for side data that changes the extradata, and an
+		// empty one would make it insert extract_extradata, so anything else will do.
+		if err := p.SetExtraData([]byte{0}); err != nil {
+			return fmt.Errorf("clearing codec config: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Sink) Write(pkt *astiav.Packet) error {
+	if config, ok := s.config[pkt.StreamIndex()]; ok {
+		delete(s.config, pkt.StreamIndex())
+		if err := attachExtradata(pkt, config); err != nil {
+			return err
+		}
+	}
+	return s.fc.WriteInterleavedFrame(pkt)
+}
 
 // Close writes the trailer and releases the muxer, so the session unpublishes cleanly.
 func (s *Sink) Close() error {

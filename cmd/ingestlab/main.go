@@ -89,6 +89,7 @@ func realMain() error {
 	fs.Var(&o.StopMediaAfter, "stop-media-after", "stop sending audio and video after this much media")
 	fs.Var(&o.ErrorMediaAfter, "error-media-after", "corrupt the video payload after this much media")
 	fs.Var(&o.CrashAfter, "crash-after", "drop the connection without unpublishing after this much media")
+	fs.BoolVar(&o.DeferCodecConfig, "defer-codec-config", false, "send each track's codec config with its first packet instead of at connect (FLV only)")
 
 	// Injected metadata.
 	fs.Var(&metas, "meta-tracks", "comma-separated tracks to inject: metadata,scte35,id3,subtitles,none (default metadata)")

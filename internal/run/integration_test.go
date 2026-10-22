@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -390,6 +391,48 @@ func TestLoopKeepsBFramesMonotonic(t *testing.T) {
 	// Two passes of a 12-minute sample.
 	if last := video[len(video)-1]; last < 24*time.Minute {
 		t.Fatalf("video ends at %v, the second pass did not arrive", last)
+	}
+}
+
+// --defer-codec-config with late tracks: nothing but onMetaData until each track starts,
+// and then its sequence header right in front of its first packet.
+func TestDeferredCodecConfigWaitsForTheTrack(t *testing.T) {
+	path := publish(t, Options{
+		Meta:             noMeta(),
+		StartAudioAfter:  after(1500 * time.Millisecond),
+		StartVideoAfter:  after(2500 * time.Millisecond),
+		StopMediaAfter:   after(5 * time.Second),
+		DeferCodecConfig: true,
+	})
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tags, err := media.SplitFLV(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		typ   byte
+		start uint32
+	}{{media.FLVAudio, 1500}, {media.FLVVideo, 2500}} {
+		i := slices.IndexFunc(tags, func(tag media.FLVTag) bool { return tag.Type == c.typ })
+		if i < 0 || i+1 >= len(tags) {
+			t.Fatalf("type %d never arrived", c.typ)
+		}
+		seq, first := tags[i], tags[i+1]
+		if len(seq.Body) < 2 || len(first.Body) < 2 {
+			t.Fatalf("type %d: tags too short to carry a packet type", c.typ)
+		}
+		if seq.Timestamp < c.start || seq.Body[1] != 0 {
+			t.Fatalf("type %d: first tag at %d ms with packet type %d, want a sequence header from %d ms",
+				c.typ, seq.Timestamp, seq.Body[1], c.start)
+		}
+		if first.Type != c.typ || first.Body[1] != 1 || first.Timestamp != seq.Timestamp {
+			t.Fatalf("type %d: the sequence header at %d ms is not followed by the first packet",
+				c.typ, seq.Timestamp)
+		}
 	}
 }
 
