@@ -15,16 +15,18 @@ import (
 
 // Kinds emitted by the pipeline.
 const (
-	StreamStart   = "stream.start"
-	StreamEnd     = "stream.end"
-	Loop          = "loop"
-	HoldStart     = "hold.start"
-	HoldBurst     = "hold.burst"
-	HoldDrop      = "hold.drop"
-	JitterBurst   = "jitter.burst"
-	FaultInjected = "fault.injected"
-	SCTE35Cue     = "scte35.cue"
-	MetaSent      = "meta.sent"
+	StreamStart    = "stream.start"
+	StreamEnd      = "stream.end"
+	Loop           = "loop"
+	HoldStart      = "hold.start"
+	HoldBurst      = "hold.burst"
+	HoldDrop       = "hold.drop"
+	InterruptStart = "interrupt.start"
+	InterruptEnd   = "interrupt.end"
+	JitterBurst    = "jitter.burst"
+	FaultInjected  = "fault.injected"
+	SCTE35Cue      = "scte35.cue"
+	MetaSent       = "meta.sent"
 )
 
 // Fields are the per-kind extras of an event.

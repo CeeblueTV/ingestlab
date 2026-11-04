@@ -1,9 +1,15 @@
 package impair
 
 import (
+	"encoding/json"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/CeeblueTV/ingestlab/internal/events"
 )
 
 // feed walks a second-by-second audio+video timeline through the hold and returns what
@@ -181,4 +187,144 @@ func TestHoldRandomDuration(t *testing.T) {
 	if len(lengths) != 1 {
 		t.Fatalf("the same seed drew %d different lengths", len(lengths))
 	}
+}
+
+func newInterrupt(tracks ...Kind) *Hold {
+	h := newHold(tracks...)
+	h.Drop = true
+	return h
+}
+
+// An interrupt cuts the chosen track for its window and lets it through again afterwards.
+// Nothing is buffered: the track comes back where the media clock has got to, leaving a
+// hole in its timeline, while everything else keeps flowing in step.
+func TestInterruptDropsTheWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	ev, err := events.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newInterrupt(Audio)
+	h.Duration, h.At, h.Events = 20*time.Second, []time.Duration{20 * time.Second}, ev
+	c := feed(t, h, 60*time.Second)
+
+	var wantAudio, wantVideo []time.Duration
+	for at := time.Duration(0); at <= 60*time.Second; at += time.Second {
+		if at < 20*time.Second || at >= 40*time.Second {
+			wantAudio = append(wantAudio, at)
+		}
+		wantVideo = append(wantVideo, at)
+	}
+	equal(t, "audio", c.of(Audio), wantAudio)
+	equal(t, "video", c.of(Video), wantVideo)
+
+	if len(h.buf) != 0 || h.holding {
+		t.Fatalf("the interrupt kept %d packets, holding=%v", len(h.buf), h.holding)
+	}
+	// Delivered in step, and with the timestamps it was read with.
+	for i, s := range c.got {
+		if i > 0 && s.Media < c.got[i-1].Media {
+			t.Fatalf("%v at %v follows %v at %v", s.Kind, s.Media, c.got[i-1].Kind, c.got[i-1].Media)
+		}
+		if s.Shift != 0 || s.Dts != s.Media.Milliseconds() {
+			t.Fatalf("%v at %v was rewritten: shift %v, dts %d", s.Kind, s.Media, s.Shift, s.Dts)
+		}
+	}
+
+	// The event log states what was cut, for whoever reads the stream back.
+	if err := ev.Close(); err != nil {
+		t.Fatal(err)
+	}
+	logged := readEvents(t, path)
+	if len(logged) != 2 || logged[0]["kind"] != events.InterruptStart || logged[1]["kind"] != events.InterruptEnd {
+		t.Fatalf("want one interrupt.start and one interrupt.end, got %v", logged)
+	}
+	if got := logged[0]["t_media"]; got != 20.0 {
+		t.Fatalf("the interrupt started at %v, want 20", got)
+	}
+	end := logged[1]
+	if end["t_media"] != 40.0 || end["dropped"] != 20.0 || end["interrupted_seconds"] != 20.0 {
+		t.Fatalf("interrupt.end is %v, want 20 packets dropped over 20s ending at 40", end)
+	}
+}
+
+// A loop flushes the chain, but an interrupt has nothing to deliver: its window runs on
+// across the loop, as the media clock does, and ends where it was scheduled to.
+func TestInterruptRunsAcrossFlush(t *testing.T) {
+	h := newInterrupt(Audio)
+	h.Duration, h.At = 10*time.Second, []time.Duration{5 * time.Second}
+	audio, video := newTrack(Audio), newTrack(Video)
+	c := &collector{}
+	run := func(from, until time.Duration) {
+		for at := from; at <= until; at += time.Second {
+			for _, tr := range []*Track{audio, video} {
+				if err := h.Process(packet(t, tr, at), c.emit); err != nil {
+					t.Fatalf("processing at %v: %v", at, err)
+				}
+			}
+		}
+	}
+
+	run(0, 8*time.Second)
+	before := len(c.got)
+	if err := h.Flush(c.emit); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.got) != before || !h.holding {
+		t.Fatalf("the flush ended the interrupt or delivered %d packets", len(c.got)-before)
+	}
+	run(9*time.Second, 20*time.Second)
+
+	var want []time.Duration
+	for at := time.Duration(0); at <= 20*time.Second; at += time.Second {
+		if at < 5*time.Second || at >= 15*time.Second {
+			want = append(want, at)
+		}
+	}
+	equal(t, "audio", c.of(Audio), want)
+	if got := len(c.of(Video)); got != 21 {
+		t.Fatalf("video should keep flowing, got %d of 21 packets", got)
+	}
+}
+
+// --interrupt-duration 0 cuts for good, like --hold-duration 0, without logging every drop.
+func TestInterruptForever(t *testing.T) {
+	ev, err := events.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newInterrupt(Audio)
+	h.Duration, h.At, h.Events = 0, []time.Duration{10 * time.Second}, ev
+	c := feed(t, h, 30*time.Second)
+
+	var want []time.Duration
+	for at := time.Duration(0); at < 10*time.Second; at += time.Second {
+		want = append(want, at)
+	}
+	equal(t, "audio", c.of(Audio), want)
+	if got := len(c.of(Video)); got != 31 {
+		t.Fatalf("video should keep flowing, got %d of 31 packets", got)
+	}
+	counts := ev.Summarise().Events
+	if counts[events.InterruptStart] != 1 || counts[events.HoldDrop] != 0 || counts[events.InterruptEnd] != 0 {
+		t.Fatalf("unexpected events %v", counts)
+	}
+}
+
+// readEvents parses an events.jsonl back into one map per line.
+func readEvents(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var e map[string]any
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("parsing %q: %v", line, err)
+		}
+		out = append(out, e)
+	}
+	return out
 }

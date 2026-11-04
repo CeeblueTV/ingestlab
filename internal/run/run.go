@@ -46,6 +46,13 @@ type Options struct {
 	HoldEvery     units.Duration
 	HoldAt        []time.Duration
 
+	// Track interrupts: the hold's schedule, but the window's packets are dropped.
+	InterruptTracks   []string
+	InterruptDuration units.Duration
+	InterruptMin      units.Duration
+	InterruptEvery    units.Duration
+	InterruptAt       []time.Duration
+
 	// Track lifecycle faults.
 	StartAudioAfter units.Duration
 	StartVideoAfter units.Duration
@@ -188,8 +195,26 @@ func buildChain(o Options, shaper *transcode.Video, injector *inject.Injector,
 		Log: log, Events: ev,
 	})
 
+	// Ahead of the hold: an interrupt is a track that stops being sent, so it decides on
+	// the paced media clock, never on a burst a hold has already shifted in time.
+	if len(o.InterruptTracks) > 0 {
+		interrupt, err := newHold(holdSpec{
+			flag: "interrupt", verb: "interrupting", drop: true,
+			tracks: o.InterruptTracks, at: o.InterruptAt,
+			duration: o.InterruptDuration, min: o.InterruptMin, every: o.InterruptEvery,
+		}, rng, log, ev)
+		if err != nil {
+			return nil, err
+		}
+		stages = append(stages, interrupt)
+	}
+
 	if len(o.HoldTracks) > 0 {
-		hold, err := newHold(o, rng, log, ev)
+		hold, err := newHold(holdSpec{
+			flag: "hold", verb: "holding",
+			tracks: o.HoldTracks, at: o.HoldAt,
+			duration: o.HoldDuration, min: o.HoldMin, every: o.HoldEvery,
+		}, rng, log, ev)
 		if err != nil {
 			return nil, err
 		}
@@ -221,48 +246,58 @@ func buildChain(o Options, shaper *transcode.Video, injector *inject.Injector,
 	return impair.NewChain(append(stages, writer)...), nil
 }
 
-func newHold(o Options, rng *rand.Rand, log *slog.Logger, ev *events.Log) (*impair.Hold, error) {
+// holdSpec is one --hold-* or --interrupt-* family of options. They share a schedule and
+// differ only in what happens to the packets inside a window.
+type holdSpec struct {
+	flag, verb           string // "hold", "holding": how the flags and logs name it
+	tracks               []string
+	at                   []time.Duration
+	duration, min, every units.Duration
+	drop                 bool
+}
+
+func newHold(s holdSpec, rng *rand.Rand, log *slog.Logger, ev *events.Log) (*impair.Hold, error) {
 	kinds := map[impair.Kind]bool{}
-	for _, name := range o.HoldTracks {
+	for _, name := range s.tracks {
 		k := impair.Kind(name)
 		switch k {
 		case impair.Audio, impair.Video, impair.Subtitle, impair.Data:
 			kinds[k] = true
 		default:
-			return nil, fmt.Errorf("unknown hold track type %q, expected audio, video, subtitle or data", name)
+			return nil, fmt.Errorf("unknown %s track type %q, expected audio, video, subtitle or data", s.flag, name)
 		}
 	}
 
 	h := &impair.Hold{
 		Tracks: kinds, Duration: impair.DefaultHoldDuration, Every: impair.DefaultHoldEvery,
-		At: o.HoldAt, Rand: rng, Log: log, Events: ev,
+		At: s.at, Drop: s.drop, Rand: rng, Log: log, Events: ev,
 	}
-	if o.HoldDuration.Present {
-		h.Duration = o.HoldDuration.Value
+	if s.duration.Present {
+		h.Duration = s.duration.Value
 	}
-	if o.HoldEvery.Present {
-		h.Every = o.HoldEvery.Value
+	if s.every.Present {
+		h.Every = s.every.Value
 	}
-	if o.HoldMin.Present && !h.Forever() {
-		if o.HoldMin.Value > h.Duration {
-			log.Warn("hold-duration-min is above hold-duration, using a fixed hold",
-				"min", o.HoldMin.Value, "max", h.Duration)
+	if s.min.Present && !h.Forever() {
+		if s.min.Value > h.Duration {
+			log.Warn(fmt.Sprintf("%[1]s-duration-min is above %[1]s-duration, using a fixed %[1]s", s.flag),
+				"min", s.min.Value, "max", h.Duration)
 		} else {
-			h.Min = o.HoldMin.Value
+			h.Min = s.min.Value
 		}
 	}
 
 	switch {
 	case h.Forever():
-		log.Info("holding tracks for good", "tracks", o.HoldTracks, "dropping", true)
+		log.Info(s.verb+" tracks for good", "tracks", s.tracks, "dropping", true)
 	case len(h.At) > 0:
-		log.Info("holding tracks", "tracks", o.HoldTracks, "at", h.At, "for", h.Duration)
+		log.Info(s.verb+" tracks", "tracks", s.tracks, "at", h.At, "for", h.Duration)
 	default:
 		if h.Every <= h.Duration {
-			log.Warn("hold-every is not above the hold duration, holds will follow each other",
+			log.Warn(fmt.Sprintf("%[1]s-every is not above the %[1]s duration, %[1]ss will follow each other", s.flag),
 				"every", h.Every, "duration", h.Duration)
 		}
-		log.Info("holding tracks", "tracks", o.HoldTracks, "every", h.Every, "for", h.Duration)
+		log.Info(s.verb+" tracks", "tracks", s.tracks, "every", h.Every, "for", h.Duration)
 	}
 	return h, nil
 }

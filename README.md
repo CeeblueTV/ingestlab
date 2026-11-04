@@ -123,6 +123,7 @@ ingestlab <source> <destination> [options]
 ingestlab video.mkv rtmp://host/live/key
 ingestlab video.mkv srt://host:9000 --loop 0
 ingestlab video.mkv rtmp://host/live/key --hold-tracks video --hold-at 20s,60s
+ingestlab video.mkv rtmp://host/live/key --interrupt-tracks audio --interrupt-at 20s --interrupt-duration 20s
 ```
 
 Options come after the source and destination.
@@ -173,6 +174,29 @@ server has to cope with.
 The muxer's own interleave buffer (`max_interleave_delta`) is held to 100 ms, well below
 libavformat's 10 s default. It is delay we would otherwise add and then measure, and it
 blunts these impairments: a 5 s hold measures 4.89 s behind at 100 ms and 4.49 s at 500 ms.
+
+### Track interrupts
+
+An interrupt is a hold that drops instead of buffering: the same schedule, but every packet
+of the interrupted tracks that falls inside the window is thrown away. The track goes silent
+and comes back where the media clock has got to, so the server sees a hole in that track's
+timeline instead of a track running late — an encoder whose audio input dropped out, say.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--interrupt-tracks` | none | tracks to cut: `audio,video,subtitle,data` |
+| `--interrupt-duration` | `10s` | length of each interrupt; `0` cuts for good |
+| `--interrupt-duration-min` | unset | when set, each interrupt lasts a random time between this and `--interrupt-duration` |
+| `--interrupt-every` | `30s` | start an interrupt this often |
+| `--interrupt-at` | unset | explicit interrupt times, e.g. `20s,60s`; overrides `--interrupt-every` |
+
+With `--interrupt-tracks audio --interrupt-at 20s --interrupt-duration 20s`, audio and video
+flow for 20 s, then only video for 20 s, then both again, the audio resuming with timestamps
+from 40 s on. Like the start delays, an interrupted video track comes back on whatever frame
+the source had there, keyframe or not.
+
+Interrupts act before holds, so the two combine: an interrupt decides on the paced media
+clock, never on a burst a hold has already moved in time.
 
 ### Track lifecycle faults
 
@@ -259,7 +283,8 @@ it from symptoms:
 ```
 
 Kinds: `stream.start`, `stream.end`, `loop`, `hold.start`, `hold.burst`, `hold.drop`,
-`jitter.burst`, `fault.injected`, `scte35.cue`, `meta.sent`.
+`interrupt.start`, `interrupt.end`, `jitter.burst`, `fault.injected`, `scte35.cue`,
+`meta.sent`. An `interrupt.end` carries how many packets the window `dropped`.
 
 ## Shutdown
 

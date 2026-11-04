@@ -167,6 +167,81 @@ func TestHoldLagsOnTheWire(t *testing.T) {
 	}
 }
 
+// An interrupt must leave a hole on the wire, not a lag: what fell inside the window never
+// arrives, the audio that follows is back in step with the video, and the video never stops.
+func TestInterruptLeavesAGapOnTheWire(t *testing.T) {
+	path := publish(t, Options{
+		Meta:              noMeta(),
+		InterruptTracks:   []string{"audio"},
+		InterruptAt:       []time.Duration{10 * time.Second},
+		InterruptDuration: after(5 * time.Second),
+	})
+	got := readBack(t, path)
+
+	// The widest step between two consecutive audio timestamps is the interrupt.
+	var gapFrom, gapTo, last time.Duration
+	resume, seen := -1, false
+	for i, p := range got {
+		if p.kind != impair.Audio {
+			continue
+		}
+		if seen && p.dts-last > gapTo-gapFrom {
+			gapFrom, gapTo, resume = last, p.dts, i
+		}
+		last, seen = p.dts, true
+	}
+	if resume < 0 {
+		t.Fatal("no audio arrived")
+	}
+	if gap := gapTo - gapFrom; gap < 4500*time.Millisecond || gap > 5500*time.Millisecond {
+		t.Fatalf("the widest audio gap runs %v to %v, want about 5s from 10s", gapFrom, gapTo)
+	}
+	if gapFrom < 9*time.Second || gapFrom > 10500*time.Millisecond {
+		t.Fatalf("audio stops at %v, want just before 10s", gapFrom)
+	}
+
+	// The audio comes back in step with the video around it, not seconds behind it.
+	for i := resume - 1; i >= 0; i-- {
+		if got[i].kind == impair.Video {
+			if skew := (gapTo - got[i].dts).Abs(); skew > time.Second {
+				t.Fatalf("audio resumes at %v next to video at %v, %v apart", gapTo, got[i].dts, skew)
+			}
+			break
+		}
+	}
+
+	// The video kept flowing through the window, in order.
+	var video []time.Duration
+	var during int
+	for _, p := range got {
+		if p.kind != impair.Video {
+			continue
+		}
+		if p.dts > gapFrom && p.dts < gapTo {
+			during++
+		}
+		video = append(video, p.dts)
+	}
+	// At least four of the five seconds' worth of frames, whatever the sample's frame rate.
+	perSecond := float64(len(video)) / mediaSpan(video).Seconds()
+	if float64(during) < 4*perSecond {
+		t.Fatalf("only %d video packets arrived during the 5s interrupt, at %.0f a second", during, perSecond)
+	}
+	for i := 1; i < len(video); i++ {
+		if video[i] <= video[i-1] {
+			t.Fatalf("video timestamps are not monotonic at %d: %v then %v", i, video[i-1], video[i])
+		}
+	}
+}
+
+// mediaSpan is the time a sorted run of timestamps covers.
+func mediaSpan(ts []time.Duration) time.Duration {
+	if len(ts) == 0 {
+		return 0
+	}
+	return ts[len(ts)-1] - ts[0]
+}
+
 // A per-track offset has to move the A/V skew on the wire by exactly its own value.
 func TestOffsetMovesSkew(t *testing.T) {
 	skew := func(o Options) time.Duration {

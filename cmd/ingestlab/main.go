@@ -46,10 +46,12 @@ func realMain() error {
 	var o run.Options
 	var (
 		// Core.
-		verbose = fs.Bool("v", false, "verbose logging")
-		holds   units.StringList
-		metas   units.StringList
-		holdAt  units.DurationList
+		verbose     = fs.Bool("v", false, "verbose logging")
+		holds       units.StringList
+		metas       units.StringList
+		holdAt      units.DurationList
+		interrupts  units.StringList
+		interruptAt units.DurationList
 
 		outputTS  units.Duration
 		jitter    units.Duration
@@ -82,6 +84,11 @@ func realMain() error {
 	fs.Var(&o.HoldMin, "hold-duration-min", "when set, each hold lasts a random time up to --hold-duration")
 	fs.Var(&o.HoldEvery, "hold-every", "start a hold every this much media (default 30s)")
 	fs.Var(&holdAt, "hold-at", "comma-separated media times at which to hold, overrides --hold-every")
+	fs.Var(&interrupts, "interrupt-tracks", "comma-separated tracks to cut, dropping their packets: audio,video,subtitle,data")
+	fs.Var(&o.InterruptDuration, "interrupt-duration", "length of each interrupt, 0 cuts for good (default 10s)")
+	fs.Var(&o.InterruptMin, "interrupt-duration-min", "when set, each interrupt lasts a random time up to --interrupt-duration")
+	fs.Var(&o.InterruptEvery, "interrupt-every", "start an interrupt every this much media (default 30s)")
+	fs.Var(&interruptAt, "interrupt-at", "comma-separated media times at which to interrupt, overrides --interrupt-every")
 
 	// Track lifecycle faults.
 	fs.Var(&o.StartAudioAfter, "start-audio-after", "withhold audio until this much media has passed")
@@ -133,6 +140,7 @@ func realMain() error {
 	o.CadenceJitter = cadence.Value
 	o.AudioOffset, o.VideoOffset = audioOff.Value, videoOff.Value
 	o.HoldTracks, o.HoldAt = holds.Values, holdAt.Values
+	o.InterruptTracks, o.InterruptAt = interrupts.Values, interruptAt.Values
 
 	o.Meta.Interval = orElse(interval, time.Second)
 	o.Meta.StartAfter = metaAfter.Value
@@ -185,6 +193,7 @@ func usage() {
   ingestlab video.mkv rtmp://host/live/key
   ingestlab video.mkv srt://host:9000 --loop 0
   ingestlab video.mkv rtmp://host/live/key --hold-tracks video --hold-at 20s,60s
+  ingestlab video.mkv rtmp://host/live/key --interrupt-tracks audio --interrupt-at 20s --interrupt-duration 20s
 
 Durations take a unit anywhere: 10s, 1500ms, 2m, 1h. A bare number is milliseconds.
 
