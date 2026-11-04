@@ -21,6 +21,10 @@ const (
 // behind the others with its timestamps untouched — which is the whole point, and why
 // nothing here rewrites a timestamp.
 //
+// With Drop set it is an interrupt instead: the same schedule, but what falls inside the
+// window is dropped rather than kept. The track goes silent and comes back where the media
+// clock has got to, so the server sees a hole in its timeline rather than a lag.
+//
 // Holds are scheduled on the media clock so a run reproduces.
 type Hold struct {
 	Tracks   map[Kind]bool
@@ -28,6 +32,7 @@ type Hold struct {
 	Min      time.Duration   // when set, each hold lasts a random Min..Duration
 	Every    time.Duration   // periodic schedule, used when At is empty
 	At       []time.Duration // explicit start times, offsets from the first packet
+	Drop     bool            // interrupt: drop the window's packets instead of bursting them
 	Rand     *rand.Rand
 
 	Log    *slog.Logger
@@ -42,6 +47,7 @@ type Hold struct {
 	holding  bool
 	index    int
 	buf      []*Packet
+	dropped  int // packets an interrupt has dropped in its current window
 }
 
 // Forever reports the --hold-duration 0 mode: the held tracks never come back and their
@@ -76,45 +82,66 @@ func (h *Hold) Process(p *Packet, next Emit) error {
 		return next(p)
 	}
 
+	verb, kind := "freezing", events.HoldStart
+	if h.Drop {
+		verb, kind = "interrupting", events.InterruptStart
+	}
 	h.start, h.holding = p.Media, true
 	if h.Forever() {
 		h.end = math.MaxInt64
-		h.Log.Info("freezing tracks for good", "tracks", h.trackNames(), "at", p.Media)
+		h.Log.Info(verb+" tracks for good", "tracks", h.trackNames(), "at", p.Media)
 	} else {
 		h.end = p.Media + h.duration()
-		h.Log.Info("freezing tracks", "tracks", h.trackNames(), "from", p.Media, "to", h.end)
+		h.Log.Info(verb+" tracks", "tracks", h.trackNames(), "from", p.Media, "to", h.end)
 	}
-	h.Events.Emit(events.HoldStart, p.Media, events.Fields{
+	h.Events.Emit(kind, p.Media, events.Fields{
 		"tracks": h.trackNames(), "forever": h.Forever(), "until": h.end.Seconds()})
 	return h.keep(p)
 }
 
 // Flush ends an open hold and delivers what it buffered. The run loop calls it before
 // looping so no pre-loop packet is sent after a post-loop one.
+//
+// An interrupt has nothing to deliver, so its window simply runs on across the loop, the
+// way the media clock does.
 func (h *Hold) Flush(next Emit) error {
-	if !h.holding || h.Forever() {
+	if !h.holding || h.Forever() || h.Drop {
 		return nil
 	}
 	return h.release(h.end, next)
 }
 
-// keep buffers the packet, or drops it when the hold is for good.
+// keep buffers the packet, or drops it when the hold is for good or is an interrupt.
 func (h *Hold) keep(p *Packet) error {
-	if h.Forever() {
+	switch {
+	case h.Drop:
+		// Counted rather than logged one by one: an interrupted audio track drops ~50 a second.
+		h.dropped++
+		p.Release()
+	case h.Forever():
 		h.Events.Emit(events.HoldDrop, p.Media, events.Fields{"track": string(p.Track.Kind)})
 		p.Release()
-		return nil
+	default:
+		p.Retain()
+		h.buf = append(h.buf, p)
 	}
-	p.Retain()
-	h.buf = append(h.buf, p)
 	return nil
 }
 
-// release closes the current hold and bursts everything it piled up.
+// release closes the current hold and bursts everything it piled up, or, for an
+// interrupt, just lets the tracks through again.
 func (h *Hold) release(at time.Duration, next Emit) error {
-	held, buf := at-h.start, h.buf
-	h.buf, h.holding = nil, false
+	held, buf, dropped := at-h.start, h.buf, h.dropped
+	h.buf, h.dropped, h.holding = nil, 0, false
 	h.schedule(at)
+
+	if h.Drop {
+		h.Log.Info("resuming interrupted tracks", "tracks", h.trackNames(), "dropped", dropped,
+			"interrupted", held, "at", at)
+		h.Events.Emit(events.InterruptEnd, at, events.Fields{
+			"dropped": dropped, "interrupted_seconds": held.Seconds(), "tracks": h.trackNames()})
+		return nil
+	}
 
 	h.Log.Info("bursting held packets", "packets", len(buf), "held", held, "at", at)
 	h.Events.Emit(events.HoldBurst, at, events.Fields{
